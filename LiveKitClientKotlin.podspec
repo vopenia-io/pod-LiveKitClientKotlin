@@ -1,6 +1,6 @@
 Pod::Spec.new do |spec|
   spec.name = "LiveKitClientKotlin"
-  spec.version = "0.0.1"
+  spec.version = "2.6.0"
   spec.summary = "Delegate wrapper for Kotlin Multiplatform"
   spec.homepage = "https://github.com/vopenia-io/pod-LiveKitClientKotlin"
   spec.license = {:type => "Apache 2.0", :file => "LICENSE"}
