@@ -51,6 +51,14 @@ public class ParticipantDelegateKotlin: NSObject, ParticipantDelegate {
         self.delegate.participant?(participant, didUpdatePermissions: permissions)
     }
 
+    /// A ``Participant``'s attributes have been updated. Maps to the
+    /// Kotlin Multiplatform binding so the SDK can observe raise-hand /
+    /// reaction-like state propagated through LiveKit participant attributes.
+    @objc
+    public func participant(_ participant: Participant, didUpdateAttributes attributes: [String: String]) {
+        self.delegate.participant?(participant, didUpdateAttributes: attributes)
+    }
+
     // MARK: - TrackPublication
 
     /// `muted` state has updated for the ``Participant``'s ``TrackPublication``.
