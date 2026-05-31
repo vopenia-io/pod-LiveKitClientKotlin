@@ -1,3 +1,4 @@
+import AVFAudio
 import AVFoundation
 import Foundation
 import LiveKitClient
@@ -129,6 +130,104 @@ public class LocalParticipantKotlin: NSObject {
             do {
                 _ = try await participant.setCamera(
                     enabled: enabled,
+                    captureOptions: options,
+                    publishOptions: nil
+                )
+                completionHandler(nil)
+            } catch {
+                completionHandler(error)
+            }
+        }
+    }
+
+    /// Route the AVAudioSession input to the device whose `uid` is supplied
+    /// (matches `AVAudioSessionPortDescription.uid`). Returns nil on success
+    /// or the underlying error on failure. iOS owns audio input routing for
+    /// LiveKit's capturer — picking the LiveKit `AudioCaptureOptions` is
+    /// insufficient.
+    @objc
+    public static func setPreferredAudioInput(
+        uid: String,
+        completionHandler: @escaping (Error?) -> Void
+    ) {
+        let session = AVAudioSession.sharedInstance()
+        let target = session.availableInputs?.first { $0.uid == uid }
+        guard let port = target else {
+            completionHandler(NSError(
+                domain: "io.vopenia.audio",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "No audio input with uid \(uid)"]
+            ))
+            return
+        }
+        do {
+            try session.setPreferredInput(port)
+            completionHandler(nil)
+        } catch {
+            completionHandler(error)
+        }
+    }
+
+    /// Cap the receiving quality of every remote **camera** track currently
+     /// subscribed in the room. Screen-share tracks are intentionally not
+     /// capped. Maps a Kotlin `VideoSubscribeQuality.ordinal` (0 = Low, 1 =
+     /// Standard, 2 = High) to LiveKit's `VideoQuality` enum.
+    @objc
+    public static func setMaxCameraReceivingQuality(
+        room: Room,
+        qualityRaw: Int,
+        completionHandler: @escaping (Error?) -> Void
+    ) {
+        let quality: VideoQuality
+        switch qualityRaw {
+        case 0: quality = .low
+        case 1: quality = .medium
+        default: quality = .high
+        }
+        Task {
+            do {
+                for participant in room.remoteParticipants.values {
+                    let cameraPubs = participant.trackPublications.values
+                        .compactMap { $0 as? RemoteTrackPublication }
+                        .filter { $0.source == .camera }
+                    for pub in cameraPubs {
+                        try await pub.set(videoQuality: quality)
+                    }
+                }
+                completionHandler(nil)
+            } catch {
+                completionHandler(error)
+            }
+        }
+    }
+
+    /// Restart the active camera track at the requested resolution. The Swift
+    /// side constructs `CameraCaptureOptions(dimensions: ...)` because the
+    /// `Dimensions` initialiser is awkward to call from Kotlin/Native.
+    /// `width`/`height` should be the target pixel dimensions of the longer
+    /// axis pair (e.g. 640x360, 1280x720). Caller is expected to map their
+    /// preset enum to these dimensions.
+    @objc
+    public static func setCameraResolution(
+        participant: LocalParticipant,
+        width: Int32,
+        height: Int32,
+        completionHandler: @escaping (Error?) -> Void
+    ) {
+        // Inherit the currently active camera position so the user doesn't
+        // see the camera flip to the system default while changing resolution.
+        let publication = participant.localVideoTracks.first { $0.source == .camera }
+        let currentCapturer = (publication?.track as? LocalVideoTrack)?.capturer as? CameraCapturer
+        let position: AVCaptureDevice.Position = currentCapturer?.options.position ?? .front
+
+        let options = CameraCaptureOptions(
+            position: position,
+            dimensions: Dimensions(width: width, height: height)
+        )
+        Task {
+            do {
+                _ = try await participant.setCamera(
+                    enabled: true,
                     captureOptions: options,
                     publishOptions: nil
                 )
