@@ -17,14 +17,18 @@ public final class LoggingBlurProcessor: NSObject, @unchecked Sendable, LiveKitC
 
     public override init() {
         super.init()
-        print("[BLUR] LoggingBlurProcessor created")
+        print("[BLUR] LoggingBlurProcessor created (instance=\(ObjectIdentifier(self).hashValue))")
     }
 
     public func process(frame: VideoFrame) -> VideoFrame? {
         frameCount += 1
-        if frameCount == 1 || frameCount % 30 == 0 {
-            print("[BLUR] processed \(frameCount) frames; dims=\(frame.dimensions.width)x\(frame.dimensions.height)")
+        if frameCount <= 3 || frameCount % 30 == 0 {
+            print("[BLUR] process #\(frameCount) dims=\(frame.dimensions.width)x\(frame.dimensions.height) buffer=\(type(of: frame.buffer))")
         }
-        return inner.process(frame: frame)
+        let out = inner.process(frame: frame)
+        if frameCount <= 3 {
+            print("[BLUR] inner.process returned \(out == nil ? "nil" : "non-nil") (frame \(frameCount))")
+        }
+        return out
     }
 }

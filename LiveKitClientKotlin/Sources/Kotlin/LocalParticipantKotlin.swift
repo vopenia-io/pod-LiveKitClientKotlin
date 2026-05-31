@@ -303,22 +303,58 @@ public class LocalParticipantKotlin: NSObject {
         )
     }
 
+    // Strong reference key for the currently-installed VideoProcessor.
+    //
+    // ROOT CAUSE this exists: `LiveKitClient.VideoCapturer.processor` is declared
+    // `weak` (Pods/LiveKitClient/.../VideoCapturer.swift:92). If we assign a
+    // processor we created locally (e.g. `LoggingBlurProcessor()`) and nothing
+    // else retains it, ARC deallocates the instance the moment this function
+    // returns. The capturer then sees `nil` on its next `_state.processor` read
+    // and skips the effect — the symptom is "setBackgroundBlur completes
+    // without error but the video stream looks unchanged".
+    //
+    // Fix: pin the processor as an associated object on the LocalParticipant
+    // it's attached to. That gives it the same lifetime as the participant,
+    // and lets a subsequent `setBackgroundBlur(enabled: false)` clear the
+    // retention (by associating `nil`).
+    private static var processorAssocKey: UInt8 = 0
+
+    private static func retainProcessor(_ processor: VideoProcessor?, on participant: LocalParticipant) {
+        objc_setAssociatedObject(participant, &processorAssocKey, processor, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+    }
+
     @available(iOS 15.0, macOS 12.0, tvOS 15.0, visionOS 1.0, *)
     private static func replaceCameraProcessor(
         participant: LocalParticipant,
         processor: VideoProcessor?,
         completionHandler: @escaping (Error?) -> Void
     ) {
+        let allLocal = participant.localVideoTracks
+        print("[BLUR] replaceCameraProcessor — localVideoTracks.count=\(allLocal.count)")
+        for pub in allLocal {
+            let t = pub.track
+            print("[BLUR]   publication source=\(pub.source) track=\(t.map { String(describing: type(of: $0)) } ?? "nil") publication=\(type(of: pub))")
+        }
+
+        // Retain strong BEFORE assigning to the weak `processor` property —
+        // otherwise the new processor is deallocated before the capturer
+        // reads it back. See the note on `processorAssocKey` above.
+        retainProcessor(processor, on: participant)
+
         // Prefer the in-place setter exposed by LiveKitClient
         // (`LocalVideoTrack.processor`) so the camera doesn't get torn down
         // and re-published on every toggle. Falls back to publish-with-processor
         // when no camera track is currently active.
         if let publication = participant.localVideoTracks.first(where: { $0.source == .camera }),
            let track = publication.track as? LocalVideoTrack {
+            print("[BLUR] in-place setter on existing camera track, processor=\(processor.map { String(describing: type(of: $0)) } ?? "nil")")
             track.processor = processor
+            let after = track.processor
+            print("[BLUR] after set: track.processor=\(after.map { String(describing: type(of: $0)) } ?? "nil")")
             completionHandler(nil)
             return
         }
+        print("[BLUR] no existing camera publication — falling back to publish-with-processor")
         Task {
             do {
                 let track: LocalVideoTrack
@@ -333,8 +369,10 @@ public class LocalParticipantKotlin: NSObject {
                     track = LocalVideoTrack.createCameraTrack()
                 }
                 _ = try await participant.publish(videoTrack: track)
+                print("[BLUR] fallback publish succeeded")
                 completionHandler(nil)
             } catch {
+                print("[BLUR] fallback publish failed: \(error)")
                 completionHandler(error)
             }
         }
