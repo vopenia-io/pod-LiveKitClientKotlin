@@ -123,6 +123,28 @@ public class LocalParticipantKotlin: NSObject {
         position: AVCaptureDevice.Position,
         completionHandler: @escaping (Error?) -> Void
     ) {
+        // Flip path: if the camera is ALREADY publishing and we're only changing
+        // the facing, `setCamera(enabled:captureOptions:)` does NOT reconfigure
+        // the live capturer (it sees the track already enabled and no-ops the
+        // position). Switch the active CameraCapturer directly — `set(cameraPosition:)`
+        // restarts capturing with the new position. This is what makes the
+        // front<->back flip button actually work mid-call.
+        if enabled,
+           let publication = participant.localVideoTracks.first(where: { $0.source == .camera }),
+           let track = publication.track as? LocalVideoTrack,
+           let capturer = track.capturer as? CameraCapturer,
+           capturer.options.position != position {
+            Task {
+                do {
+                    _ = try await capturer.set(cameraPosition: position)
+                    completionHandler(nil)
+                } catch {
+                    completionHandler(error)
+                }
+            }
+            return
+        }
+
         let options: CameraCaptureOptions? = enabled
             ? CameraCaptureOptions(position: position)
             : nil
