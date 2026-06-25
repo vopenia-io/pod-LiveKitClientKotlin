@@ -2,6 +2,7 @@ import AVFAudio
 import AVFoundation
 import Foundation
 import LiveKitClient
+import UIKit
 
 /// Thin Swift bridge exposing LiveKit `LocalParticipant` async/throwing methods
 /// (and Swift-only initialisers) as Objective-C completion-handler signatures
@@ -188,6 +189,100 @@ public class LocalParticipantKotlin: NSObject {
         } catch {
             completionHandler(error)
         }
+    }
+
+    // MARK: - Audio output routing (earpiece / speaker / bluetooth)
+
+    /// Route the in-call audio OUTPUT (and, for Bluetooth, the mic INPUT).
+    /// `route` is "speaker", "earpiece" or "bluetooth". The AVAudioSession is
+    /// shared and owned by the host app; LiveKit's capture/render honour it.
+    @objc
+    public static func setAudioOutput(
+        route: String,
+        completionHandler: @escaping (Error?) -> Void
+    ) {
+        let session = AVAudioSession.sharedInstance()
+        do {
+            switch route {
+            case "speaker":
+                // videoChat mode defaults output to the loudspeaker.
+                try session.setMode(.videoChat)
+                if let mic = builtInMic(session) { try? session.setPreferredInput(mic) }
+                try session.overrideOutputAudioPort(.speaker)
+            case "earpiece":
+                // voiceChat mode defaults output to the receiver (earpiece);
+                // .none alone in videoChat mode would stay on the loudspeaker.
+                // Under CallKit this mode change is also what drives the proximity
+                // sensor (voiceChat = on), the native/instant way.
+                try session.setMode(.voiceChat)
+                if let mic = builtInMic(session) { try? session.setPreferredInput(mic) }
+                try session.overrideOutputAudioPort(.none)
+            case "bluetooth":
+                try session.setMode(.voiceChat)
+                if let bt = bluetoothInput(session) { try session.setPreferredInput(bt) }
+                try session.overrideOutputAudioPort(.none)
+            default:
+                completionHandler(NSError(
+                    domain: "io.vopenia.audio",
+                    code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "Unknown audio route \(route)"]
+                ))
+                return
+            }
+            completionHandler(nil)
+        } catch {
+            completionHandler(error)
+        }
+    }
+
+    /// True when a Bluetooth headset (HFP/LE/A2DP) is connected and usable.
+    @objc
+    public static func isBluetoothConnected() -> Bool {
+        let session = AVAudioSession.sharedInstance()
+        if (session.availableInputs ?? []).contains(where: { isBluetooth($0.portType) }) {
+            return true
+        }
+        return session.currentRoute.outputs.contains { isBluetooth($0.portType) }
+    }
+
+    /// Observe AVAudioSession route changes (e.g. a Bluetooth headset
+    /// connecting/disconnecting). `onChange` fires on the main queue for each
+    /// change; the caller re-reads `isBluetoothConnected()`.
+    @objc
+    public static func startAudioRouteObserver(onChange: @escaping () -> Void) {
+        stopAudioRouteObserver()
+        routeObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.routeChangeNotification,
+            object: nil,
+            queue: .main
+        ) { _ in onChange() }
+    }
+
+    @objc
+    public static func stopAudioRouteObserver() {
+        if let token = routeObserver {
+            NotificationCenter.default.removeObserver(token)
+            routeObserver = nil
+        }
+    }
+
+    // NOTE: the proximity sensor is intentionally NOT driven here. Under CallKit,
+    // UIDevice.isProximityMonitoringEnabled does nothing AND fights the system;
+    // CallKit manages proximity from the AVAudioSession mode (.voiceChat = on,
+    // .videoChat = off), set per route in setAudioOutput above.
+
+    private static var routeObserver: NSObjectProtocol?
+
+    private static func builtInMic(_ session: AVAudioSession) -> AVAudioSessionPortDescription? {
+        session.availableInputs?.first { $0.portType == .builtInMic }
+    }
+
+    private static func bluetoothInput(_ session: AVAudioSession) -> AVAudioSessionPortDescription? {
+        session.availableInputs?.first { isBluetooth($0.portType) }
+    }
+
+    private static func isBluetooth(_ port: AVAudioSession.Port) -> Bool {
+        port == .bluetoothHFP || port == .bluetoothLE || port == .bluetoothA2DP
     }
 
     /// Cap the receiving quality of every remote **camera** track currently
@@ -398,5 +493,61 @@ public class LocalParticipantKotlin: NSObject {
                 completionHandler(error)
             }
         }
+    }
+
+    // MARK: - Standalone track effects (prejoin preview)
+    //
+    // The participant-bound methods above need a published publication. The
+    // prejoin preview renders an independent `LocalVideoTrack` (no participant,
+    // never published), so these variants set the processor directly on a track.
+    // Same weak-property pitfall as above: the processor is pinned on the track
+    // via an associated object so it is not deallocated before the capturer reads
+    // it back.
+
+    /// Enable or disable background blur on a standalone `LocalVideoTrack`
+    /// (e.g. the prejoin preview capturer), independent of any publication.
+    @objc
+    @available(iOS 15.0, macOS 12.0, tvOS 15.0, visionOS 1.0, *)
+    public static func setBackgroundBlur(
+        track: LocalVideoTrack,
+        enabled: Bool,
+        completionHandler: @escaping (Error?) -> Void
+    ) {
+        setTrackProcessor(
+            track: track,
+            processor: enabled ? LoggingBlurProcessor() : nil,
+            completionHandler: completionHandler
+        )
+    }
+
+    /// Apply or remove a virtual background image on a standalone `LocalVideoTrack`.
+    /// Pass `nil` to remove the effect.
+    @objc
+    @available(iOS 15.0, macOS 12.0, tvOS 15.0, visionOS 1.0, *)
+    public static func setBackgroundImage(
+        track: LocalVideoTrack,
+        image: UIImage?,
+        completionHandler: @escaping (Error?) -> Void
+    ) {
+        let processor: BackgroundImageVideoProcessor? = image.map { BackgroundImageVideoProcessor(image: $0) }
+        setTrackProcessor(track: track, processor: processor, completionHandler: completionHandler)
+    }
+
+    private static var trackProcessorAssocKey: UInt8 = 0
+
+    private static func retainProcessor(_ processor: VideoProcessor?, on track: LocalVideoTrack) {
+        objc_setAssociatedObject(track, &trackProcessorAssocKey, processor, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+    }
+
+    @available(iOS 15.0, macOS 12.0, tvOS 15.0, visionOS 1.0, *)
+    private static func setTrackProcessor(
+        track: LocalVideoTrack,
+        processor: VideoProcessor?,
+        completionHandler: @escaping (Error?) -> Void
+    ) {
+        // Retain strong BEFORE assigning to the weak `processor` property.
+        retainProcessor(processor, on: track)
+        track.processor = processor
+        completionHandler(nil)
     }
 }
