@@ -58,11 +58,38 @@ public class BackgroundImageVideoProcessor: NSObject, LiveKitClient.VideoProcess
         let scaleY = frameCIImage.extent.height / maskCIImage.extent.height
         let scaledMask = maskCIImage.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
 
-        let scaledBg = bg
+        // The capturer delivers buffers in sensor orientation plus a `rotation`
+        // that the renderer applies at display time (SampleBufferVideoRenderer:
+        // +90° clockwise for ._90). The person in the frame is therefore stored
+        // pre-rotated in buffer space; the background must be pre-rotated the
+        // same way (the inverse of the display rotation) or it shows up turned
+        // by `rotation` degrees on screen — upright only in landscape.
+        let orientedBg: CIImage
+        switch frame.rotation {
+        case ._90: orientedBg = bg.oriented(.left)
+        case ._180: orientedBg = bg.oriented(.down)
+        case ._270: orientedBg = bg.oriented(.right)
+        default: orientedBg = bg
+        }
+
+        // Cover-scale: fill the frame preserving the background's aspect ratio
+        // and center-crop the overflow. A non-uniform stretch to the frame's
+        // extent squashes a 16:9 photo into a 9:16 portrait frame. The clamp
+        // guards against float-rounding hairlines at the crop edges.
+        let frameExtent = frameCIImage.extent
+        let coverScale = max(
+            frameExtent.width / orientedBg.extent.width,
+            frameExtent.height / orientedBg.extent.height
+        )
+        let scaledBgUncropped = orientedBg
+            .transformed(by: CGAffineTransform(scaleX: coverScale, y: coverScale))
+        let scaledBg = scaledBgUncropped
             .transformed(by: CGAffineTransform(
-                scaleX: frameCIImage.extent.width / bg.extent.width,
-                y: frameCIImage.extent.height / bg.extent.height
+                translationX: frameExtent.midX - scaledBgUncropped.extent.midX,
+                y: frameExtent.midY - scaledBgUncropped.extent.midY
             ))
+            .clampedToExtent()
+            .cropped(to: frameExtent)
 
         guard let blended = CIFilter(name: "CIBlendWithMask", parameters: [
             kCIInputImageKey: frameCIImage,
