@@ -48,7 +48,10 @@ public final class BbbaNoiseFilterKotlin: NSObject {
             install()
             NSLog("[BBBA-iOS] WARNING: setEnabled called before install() — first session may bypass")
         }
-        filter.enabled = enabled
+        // Method (not the bare property): an OFF -> ON transition rebuilds
+        // the engine so processing never resumes on the stale DSP state
+        // frozen during the disabled window (outgoing level squash).
+        filter.setEnabled(enabled)
     }
 
     /// RNNoise dry/wet intensity, 0..100 (% wet).

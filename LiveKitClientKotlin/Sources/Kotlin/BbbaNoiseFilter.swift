@@ -19,6 +19,7 @@ public final class BbbaNoiseFilter: NSObject, AudioCustomProcessingDelegate {
 
     private let lock = NSLock()
     private var engine: BBBAEngine?
+    private var sampleRate: Int = 0
     private var frameCount: Int = 0
 
     // Parameter defaults — must match the BBBA web reference UI
@@ -49,10 +50,43 @@ public final class BbbaNoiseFilter: NSObject, AudioCustomProcessingDelegate {
         }
     }
 
+    /// Toggle entry point used by the Kotlin bridge. An OFF -> ON transition
+    /// rebuilds the engine first: the disabled window freezes the DSP's
+    /// adaptive state (VAD gate envelope, RNNoise noise model, and above all
+    /// the Faust leveler/multiband integrators), and resuming on that stale
+    /// state squashes the outgoing level until the engine is recreated —
+    /// users had to kill the app to recover. The rebuild happens while still
+    /// disabled, so no capture callback is inside the old engine.
+    /// (Swift-only on purpose: an @objc method here would collide with the
+    /// `enabled` property's generated `setEnabled:` selector.)
+    public func setEnabled(_ on: Bool) {
+        if on && !enabled { rebuildEngine() }
+        enabled = on
+    }
+
+    private func rebuildEngine() {
+        lock.lock()
+        let sr = sampleRate
+        let hadEngine = engine != nil
+        lock.unlock()
+        guard hadEngine, sr == 48000 else { return }
+
+        // Construct outside the lock (rnnoise + Faust init), swap under it.
+        let e = BBBAEngine(sampleRate: Int32(sr))
+        e?.setParam("intensity", value: intensity)
+        e?.setParam("mb_strength", value: mbStrength)
+        e?.setParam("sb_strength", value: sbStrength)
+        e?.setParam("leveler_target", value: levelerTarget)
+
+        lock.lock(); engine = e; lock.unlock()
+        NSLog("[BBBA-iOS] re-enable: engine rebuilt (engine=%@)", e == nil ? "nil" : "ready")
+    }
+
     public var audioProcessingName: String { "bigbluebetteraudio" }
 
     public func audioProcessingInitialize(sampleRate sampleRateHz: Int, channels: Int) {
         lock.lock(); defer { lock.unlock() }
+        sampleRate = sampleRateHz
         guard sampleRateHz == 48000 else {
             NSLog("[BBBA-iOS] bypassed: RNNoise requires 48kHz, got %d", sampleRateHz)
             engine = nil
