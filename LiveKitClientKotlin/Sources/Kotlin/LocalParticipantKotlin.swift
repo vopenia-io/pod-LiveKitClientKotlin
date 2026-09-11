@@ -191,6 +191,31 @@ public class LocalParticipantKotlin: NSObject {
         }
     }
 
+    // MARK: - Audio session ownership (CallKit)
+
+    /// Hand the shared AVAudioSession over to the host app (CallKit) or back to LiveKit.
+    ///
+    /// By default LiveKit's `DefaultAudioSessionObserver` sets the category and activates
+    /// the session itself every time its audio engine is enabled or disabled: `.playback`
+    /// while no microphone is published, and a deactivate + reactivate on every switch.
+    /// Under CallKit only the system may activate the session, in
+    /// `provider(_:didActivate:)`; an engine started outside that window fails and the far
+    /// end goes silent. Passing `false` keeps only LiveKit's mixer observer in the engine
+    /// chain (rebuilt on every engine event, so this applies immediately) and leaves the
+    /// category to the app. LiveKit 2.6.1+ exposes the same switch as
+    /// `AudioManager.shared.audioSession.isAutomaticConfigurationEnabled`.
+    @objc(setAutomaticAudioSessionConfigurationEnabled:)
+    public static func setAutomaticAudioSessionConfigurationEnabled(_ enabled: Bool) {
+        #if os(iOS) || os(visionOS) || os(tvOS)
+        let manager = AudioManager.shared
+        if enabled {
+            manager.set(engineObservers: [DefaultAudioSessionObserver(), manager.mixer])
+        } else {
+            manager.set(engineObservers: [manager.mixer])
+        }
+        #endif
+    }
+
     // MARK: - Audio output routing (earpiece / speaker / bluetooth)
 
     /// Route the in-call audio OUTPUT (and, for Bluetooth, the mic INPUT).
