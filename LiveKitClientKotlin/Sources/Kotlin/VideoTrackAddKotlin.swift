@@ -1,5 +1,6 @@
 import Foundation
 import LiveKitClient
+import Metal
 
 @objc
 public class VideoTrackAddKotlin: NSObject {
@@ -16,6 +17,9 @@ public class VideoTrackAddKotlin: NSObject {
 
         if let track = trackParam as? VideoTrack {
             DispatchQueue.main.async {
+                if RendererChoice.needsSampleBuffer, videoView.renderMode == .auto {
+                    videoView.renderMode = .sampleBuffer
+                }
                 videoView.track = track
                 DimensionsRelayout.follow(videoView, track: track as? Track)
             }
@@ -32,6 +36,19 @@ public class VideoTrackAddKotlin: NSObject {
             DimensionsRelayout.follow(videoView, track: nil)
         }
     }
+}
+
+/// Which renderer a VideoView in `.auto` mode should get.
+///
+/// LiveKit 2.6.0 resolves `.auto` to its Metal renderer on every device, and that renderer
+/// freezes the whole app on Apple GPUs of family 6 and below (A13 and older: iPhone 11,
+/// iPad Pro 2018). Upstream renders those through AVSampleBufferDisplayLayer since
+/// client-sdk-swift#954; this makes the same choice before a track is bound.
+private enum RendererChoice {
+    static let needsSampleBuffer: Bool = {
+        guard let device = MTLCreateSystemDefaultDevice() else { return true }
+        return !device.supportsFamily(.apple7)
+    }()
 }
 
 /// Lays a VideoView out again whenever its track's dimensions change.
